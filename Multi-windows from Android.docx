@@ -1,0 +1,406 @@
+多窗口功能介绍
+概述
+在以往的Android系统上，所有Activity都是全屏的，如果不设置透明效果，一次只能看到一个Activity界面。
+但是从Android N（7.0）版本开始，系统支持了多窗口功能。
+在有了多窗口支持之后，用户可以同时打开和看到多个应用的界面。
+并且系统还支持在多个应用之间进行拖拽。在大屏幕设备上，这一功能非常实用。
+本文将详细讲解Android系统中多窗口功能的实现。
+关于Android N的新特性，请参见这里：Android 7.0 for Developers
+关于多窗口的详细说明，请参见这里：Multi-Window Support
+Android N上的多窗口功能有三种模式：
+* 分屏模式
+这种模式可以在手机上使用。该模式将屏幕一分为二，同时显示两个应用的界面。如下图所示：
+
+* 画中画模式
+这种模式主要在TV上使用，在该模式下视频播放的窗口可以一直在最顶层显示。如下图所示：
+
+* Freeform模式
+这种模式类似于我们常见的桌面操作系统，应用界面的窗口可以自由拖动和修改大小。如下图所示：
+
+生命周期
+多窗口不影响和改变原先Activity的生命周期。
+在多窗口模式，多个Activity可以同时可见，但只有一个Activity是最顶层的，即：获取焦点的Activity。
+所有其他Activity都会处于Paused状态（尽管它们是可见的）。在以下三种场景下，系统会通知应用有状态变化，应用可以进行处理：
+* 当用户以多窗口的模式启动的应用
+* 当用户改变了Activity的窗口大小
+* 当用户将应用窗口从多窗口模式改为全屏模式
+关于应用如何进行状态变化的处理，请参见这里：Handling Runtime Changes，这里不再赘述。
+开发者相关
+Android从API Level 24开始，提供了以下一些机制来配合多窗口功能的使用。
+* Manifest新增属性
+o android:resizeableActivity=["true" | "false"]
+这个属性可以用在<activity>或者<application> 上。置为true，表示可以以分屏或者Freeform模式启动。false表示不支持多窗口模式。对于API目标Level为24的应用来说，这个值默认是true。
+o android:supportsPictureInPicture=["true" | "false"]
+这个属性用在<activity>上，表示是否支持画中画模式。如果android:resizeableActivity为false，这个属性值将被忽略。
+* Layout新增属性
+o android:defaultWidth，android:defaultHeight?Freeform模式下的默认宽度和高度
+o android:gravity?Freeform模式下的初始Gravity
+o android:minWidth, android:minHeight?分屏和Freeform模式下的最小高度和宽度
+这里是一段代码示例：
+<activity android:name=".MyActivity">
+    <layout android:defaultHeight="500dp"
+          android:defaultWidth="600dp"
+          android:gravity="top|end"
+          android:minHeight="450dp"
+          android:minWidth="300dp" />
+</activity>
+* 新增API
+o Activity.isInMultiWindowMode()?查询是否处于多窗口模式
+o Activity.isInPictureInPictureMode()?查询是否处于画中画模式
+o Activity.onMultiWindowModeChanged()?多窗口模式变化时进行通知(进入或退出多窗口)
+o Activity.onPictureInPictureModeChanged()?画中画模式变化时进行通知（进入或退出画中画模式）
+o Activity.enterPictureInPictureMode()?调用这个接口进入画中画模式，如果系统不支持，这个调用无效
+o ActivityOptions.setLaunchBounds()?在系统已经处于Freeform模式时，可以通过这个参数来控制新启动的Activity大小，如果系统不支持，这个调用无效
+* 拖拽相关
+Android N之前，系统只允许在一个Activity内部进行拖拽。但从Android N开始，系统支持在多个Activity之间进行拖拽，下面是一些相关的API。具体说明请参见官方文档。
+- `DragAndDropPermissions`
+- `View.startDragAndDrop()`
+- `View.cancelDragAndDrop()`
+- `View.updateDragShadow()`
+- `Activity.requestDragAndDropPermissions()`
+相关模块和主要类
+本文，我们主要关注多窗口的功能实现。这里列出了多窗口功能实现的主要类和模块。
+这里的代码路径是指AOSP的源码路径，关于如何获取AOSP源码请参见这里：Downloading the Source。
+ActivityManager
+代码路径：/frameworks/base/services/core/java/com/android/server/am
+* ActivityManagerService?负责运行时管理的系统服务，这个类掌管了Android系统的四大组件（Activity，Service，BroadcastReceiver，ContentProvider），应用进程的启动退出，进程优先级的控制。说它是Framework中最重要的系统服务都不为过。
+* TaskRecord，ActivityStack?管理Activity的容器，多窗口的实现强烈依赖于ActivityStack，下文会详细讲解。
+* ActivityStackSupervisor?顾名思义，专门负责管理ActivityStack。
+* ActivityStarter?Android N新增类。掌控Activity的启动。
+WindowManager
+代码路径：/frameworks/base/services/core/java/com/android/server/wm
+* WindowManagerService?负责窗口管理的系统服务。
+* Task，TaskStack?管理窗口对象的容器，与TaskRecord和ActivityStack对应。
+* WindowLayersController?Android N新增类，专门负责Z-Order的计算。Z-Order决定了窗口的上下关系。
+Framework API
+代码路径：frameworks/base/core/java/
+* ActivityManager?提供了管理Activity的接口和常量。
+* ActivityOptions?提供了启动Activity的参数选项，例如，在Freefrom模式下，设置窗口大小。
+SystemUI
+代码路径：/frameworks/base/packages/SystemUI/
+顾名思义：系统UI，这里包括：NavigationBar，StatusBar，Keyguard等。
+* PhoneStatusBar?SystemUI中非常重要的一个类，负责了很多组件的初始化和控制。
+为了便于说明，下文将直接使用这里提到的类。如果你想查看这些类的源码，请参阅这里的路径。
+多窗口的功能实现
+多窗口功能的实现主要依赖于ActivityManagerService与WindowManagerService这两个系统服务，它们都位于system_server进程中。该进程是Android系统中一个非常重要的系统进程。Framework中的很多服务都位于这个进程中。
+整个Android的架构是CS的模型，应用程序是Client，而system_server进程就是对应的Server。
+应用程序调用的很多API都会发送到system_server进程中对应的系统服务上进行处理，例如startActivity这个API，最终就是由ActivityManagerService进行处理。
+而由于应用程序和system_server在各自独立的进程中运行，因此对于系统服务的请求需要通过Binder进行进程间通讯（IPC）来完成调用，以及调用结果的返回。
+两个系统服务简介
+ActivityManagerService负责Activity管理。
+对于应用中创建的每一个Activity，在ActivityManagerService中都会有一个与之对应的ActivityRecord，这个ActivityRecord记录了应用程序中的Activity的状态。ActivityManagerService会利用这个ActivityRecord作为标识，对应用程序中的Activity进程调度，例如生命周期的管理。
+实际上，ActivityManagerService的职责远超出的它的名称，ActivityManagerService负责了所有四大组件（Activity，Service，BroadcastReceiver，ContentProvider）的管理，以及应用程序的进程管理。
+WindowManagerService负责Window管理。包括：
+* 窗口的创建和销毁
+* 窗口的显示与隐藏
+* 窗口的布局
+* 窗口的Z-Order管理
+* 焦点的管理
+* 输入法和壁纸管理
+等等每一个Activity都会有一个自己的窗口，在WindowManagerService中便会有一个与之对应的WindowState。WindowManagerService以此标示应用程序中的窗口，并用这个WindowState来存储，查询和控制窗口的状态。
+ActivityManagerService与WindowManagerService需要紧密配合在一起工作，因为无论是创建还是销毁Activity都牵涉到Actiivty对象和窗口对象的创建和销毁。这两者是既相互独立，又紧密关联在一起的。
+Activity启动过程
+Activity的启动过程主要包含以下几个步骤：
+* Intent的解析（Intent可能是隐式的：关于Intents and Intent Filters）
+* Activity的匹配（符合Intent的Activity可能会有多个）
+* 应用进程的创建
+* Task，Stack的获取或者创建
+* Activity窗口的创建
+* Activity生命周期的调度（onCreate，onResume等）
+本文不打算讲解Activity启动的详细过程，对于这部分内容有兴趣的读者请参阅其他资料。
+Task和Stack
+Android系统中的每一个Activity都位于一个Task中。一个Task可以包含多个Activity，同一个Activity也可能有多个实例。
+在AndroidManifest.xml中，我们可以通过android:launchMode来控制Activity在Task中的实例。
+另外，在startActivity的时候，我们也可以通过setFlag) 来控制启动的Activity在Task中的实例。
+Task管理的意义还在于近期任务列表以及Back栈。当你通过多任务键（有些设备上是长按Home键，有些设备上是专门提供的多任务键）调出多任务时，其实就是从ActivityManagerService获取了最近启动的Task列表。
+Back栈管理了当你在Activity上点击Back键，当前Activity销毁后应该跳转到哪一个Activity的逻辑。关于Task和Back栈，请参见这里：Tasks and Back Stack。
+其实在ActivityManagerService与WindowManagerService内部管理中，在Task之外，还有一层容器，这个容器应用开发者和用户可能都不会感觉到或者用到，但它却非常重要，那就是Stack。
+下文中，我们将看到，Android系统中的多窗口管理，就是建立在Stack的数据结构上的。
+一个Stack中包含了多个Task，一个Task中包含了多个Activity（Window），下图描述了它们的关系：
+
+另外还有一点需要注意的是，ActivityManagerService和WindowManagerService中的Task和Stack结构是一一对应的，对应关系对于如下：
+* ActivityStack <--> TaskStack
+* TaskRecord <--> Task
+即，ActivityManagerService中的每一个ActivityStack或者TaskRecord在WindowManagerService中都有对应的TaskStack和Task，这两类对象都有唯一的id（id是int类型），它们通过id进行关联。
+多窗口与Stack
+用过macOS或者Ubuntu的人应该都会用过虚拟桌面的功能，如下图所示：
+这里创建了多个“虚拟桌面”，并在最上面一排列出了出来。
+每个虚拟桌面里面都可以放置一个或多个应用窗口，虚拟桌面可以作为一个整体进行切换。
+Android为了支持多窗口，在运行时创建了多个Stack，Stack就是类似这里虚拟桌面的作用。
+每个Stack会有一个唯一的Id，在ActivityManager.java中定义了这些Stack的Id：
+/** First static stack ID. */
+public static final int FIRST_STATIC_STACK_ID = 0;
+
+/** Home activity stack ID. */
+public static final int HOME_STACK_ID = FIRST_STATIC_STACK_ID;
+
+/** ID of stack where fullscreen activities are normally launched into. */
+public static final int FULLSCREEN_WORKSPACE_STACK_ID = 1;
+
+/** ID of stack where freeform/resized activities are normally launched into. */
+public static final int FREEFORM_WORKSPACE_STACK_ID = FULLSCREEN_WORKSPACE_STACK_ID + 1;
+
+/** ID of stack that occupies a dedicated region of the screen. */
+public static final int DOCKED_STACK_ID = FREEFORM_WORKSPACE_STACK_ID + 1;
+
+/** ID of stack that always on top (always visible) when it exist. */
+public static final int PINNED_STACK_ID = DOCKED_STACK_ID + 1;
+由此我们可以知道，系统中可能会包含这么几个Stack：
+* 【Id：0】Home Stack，这个是Launcher所在的Stack。?其实还有一些系统界面也运行在这个Stack上，例如近期任务
+* 【Id：1】FullScren Stack，全屏的Activity所在的Stack。?但其实在分屏模式下，Id为1的Stack只占了半个屏幕。
+* 【Id：2】Freeform模式的Activity所在Stack
+* 【Id：3】Docked Stack?下文中我们将看到，在分屏模式下，屏幕有一半运行了一个固定的应用，这个就是这里的Docked Stack
+* 【Id：4】Pinned Stack?这个是画中画Activity所在的Stack
+需要注意的是，这些Stack并不是系统一启动就全部创建好的。而是在需要用到的时候才会创建。上文已经提到过，ActivityStackSupervisor负责ActivityStack的管理。
+有了以上这些背景知识之后，我们再来具体讲解一下Android系统中的三种多窗口模式。
+分屏模式
+在Nexus 6P手机上，分屏模式的启动和退出是长按多任务虚拟按键。?下图是在Nexus 6P上启动分屏模式的样子：
+
+在启动分屏模式的之后，系统会将屏幕一分为二。当前打开的应用移到屏幕上方（如果是横屏那就是左边），其他所有打开的应用，在下方（如果是横屏那就是右边）以多任务形式列出。
+之后用户在操作的时候，下方的半屏保持了原先的使用方式：可以启动或退出应用，可以启动多任务后进行切换，而上方的应用保持不变。前面我们已经提到过，其实这里处于上半屏固定不变的应用就是处在Docked的Stack中（Id为3），下半屏是之前全屏的Stack进行了Resize（Id为1）。
+下面，我们就顺着长按多任务按钮为线索，来调查一下分屏模式是如何启动的：其实无论是NavigationBar（屏幕最下方的三个虚拟按键）还是StatusBar（屏幕最上方的状态栏）都是在SystemUI中。我们可以以此为入口来调查。
+PhoneStatusBar#prepareNavigationBarView?为NavigationBar初始化了UI。同时也在这里为按钮设置了事件监听器。这里包括我们感兴趣的近期任务按钮的长按事件监听器：
+private void prepareNavigationBarView() {
+   mNavigationBarView.reorient();
+
+   ButtonDispatcher recentsButton = mNavigationBarView.getRecentsButton();
+   recentsButton.setOnClickListener(mRecentsClickListener);
+   recentsButton.setOnTouchListener(mRecentsPreloadOnTouchListener);
+   recentsButton.setLongClickable(true);
+   recentsButton.setOnLongClickListener(mRecentsLongClickListener);
+   ...
+}
+在mRecentsLongClickListener中，主要的逻辑就是调用toggleSplitScreenMode。
+toggleSplitScreenMode这个方法的名称很明显的告诉我们，这里是在切换分屏模式
+private View.OnLongClickListener mRecentsLongClickListener = new View.OnLongClickListener() {
+
+   @Override
+   public boolean onLongClick(View v) {
+       if (mRecents == null || !ActivityManager.supportsMultiWindow()
+               || !getComponent(Divider.class).getView().getSnapAlgorithm()
+                       .isSplitScreenFeasible()) {
+           return false;
+       }
+
+       toggleSplitScreenMode(MetricsEvent.ACTION_WINDOW_DOCK_LONGPRESS,
+               MetricsEvent.ACTION_WINDOW_UNDOCK_LONGPRESS);
+       return true;
+   }
+};
+再顺着往下看PhoneStatusBar#toggleSplitScreenMode的代码：
+这里我们看到，通过查询WindowManagerProxy.getInstance().getDockSide();?来确定当前是否处于分屏模式，如果没有则将Top Task移到Docked的Stack上。这里的Top Task就是我们在长按多任务按键之前打开的当前应用。
+@Override
+protected void toggleSplitScreenMode(int metricsDockAction, int metricsUndockAction) {
+   if (mRecents == null) {
+       return;
+   }
+   int dockSide = WindowManagerProxy.getInstance().getDockSide();
+   if (dockSide == WindowManager.DOCKED_INVALID) {
+       mRecents.dockTopTask(NavigationBarGestureHelper.DRAG_MODE_NONE,
+               ActivityManager.DOCKED_STACK_CREATE_MODE_TOP_OR_LEFT, null, metricsDockAction);
+   } else {
+       EventBus.getDefault().send(new UndockingTaskEvent());
+       if (metricsUndockAction != -1) {
+           MetricsLogger.action(mContext, metricsUndockAction);
+       }
+   }
+}
+之后便会调用到ActivityManagerService#moveTaskToDockedStack中。后面的大部分逻辑在ActivityStackSupervisor#moveTaskToStackLocked中，在这个方法中，会做如下几件事情：
+* 通过指定的taskId获取对应的TaskRecord
+* 为当前Activity替换窗口（因为要从FullScreen的Stack切换的Docked Stack上）
+* 调用mWindowManager.deferSurfaceLayout通知WindowManagerService暂停布局
+* 将当前TaskRecord移动到Docked Stack上
+* 为移动后的Task和Stack设置Bounds，并且进行resize。这里还会通知Activity?onMultiWindowModeChanged
+* 调用mWindowManager.continueSurfaceLayout(); 通知WindowManagerService继续开始布局
+而Resize和布局就完全是WindowManagerService的事情，这里面需要计算两个Stack各自的大小，然后根据大小来对Stack中的Task和Activity窗口进行重新布局。
+由于篇幅关系，这里不再贴出更多的代码。如果有兴趣，请自行获取AOSP的代码然后查看。
+下图总结了启动分屏模式的执行逻辑：
+
+这里需要注意的是：
+黄色标记的模式是运行在SystemUI的进程中。
+蓝色标记的模式是运行在system_server进程中。
+moveTaskToDockedStack是一个Binder调用，通过IPC调用到了ActivityManagerService。
+画中画模式
+当应用程序调用Activity#enterPictureInPictureMode便进入了画中画模式。
+Activity#enterPictureInPictureMode会通过Binder调用到ActivityManagerService中对应的方法，该方法代码如下：
+public void enterPictureInPictureMode(IBinder token) {
+   final long origId = Binder.clearCallingIdentity();
+   try {
+       synchronized(this) {
+           if (!mSupportsPictureInPicture) {
+               throw new IllegalStateException("enterPictureInPictureMode: "
+                       + "Device doesn't support picture-in-picture mode.");
+           }
+
+           final ActivityRecord r = ActivityRecord.forTokenLocked(token);
+
+           if (r == null) {
+               throw new IllegalStateException("enterPictureInPictureMode: "
+                       + "Can't find activity for token=" + token);
+           }
+
+           if (!r.supportsPictureInPicture()) {
+               throw new IllegalArgumentException("enterPictureInPictureMode: "
+                       + "Picture-In-Picture not supported for r=" + r);
+           }
+
+           // Use the default launch bounds for pinned stack if it doesn't exist yet or use the
+           // current bounds.
+           final ActivityStack pinnedStack = mStackSupervisor.getStack(PINNED_STACK_ID);
+           final Rect bounds = (pinnedStack != null)
+                   ? pinnedStack.mBounds : mDefaultPinnedStackBounds;
+
+           mStackSupervisor.moveActivityToPinnedStackLocked(
+                   r, "enterPictureInPictureMode", bounds);
+       }
+   } finally {
+       Binder.restoreCallingIdentity(origId);
+   }
+}
+这里的?mStackSupervisor.getStack(PINNED_STACK_ID);?是在获取Pinned Stack，当这个Stack不存在时，会将其创建。
+IBinder token是调用enterPictureInPictureMode的Activity的Binder标示，通过这个标示可以获取到Activity对应的ActivityRecord对象，然后就是将这个ActivityRecord移动到Pinned Stack上。
+Pinned Stack的默认大小来自于mDefaultPinnedStackBounds，这个值是从Internal的Resource上获取的：
+mDefaultPinnedStackBounds = Rect.unflattenFromString(res.getString(
+     com.android.internal.R.string.config_defaultPictureInPictureBounds));
+而com.android.internal.R.string.config_defaultPictureInPictureBounds的值是从配置文件：/frameworks/base/core/res/res/values/config.xml 中读取的。
+为什么一旦将Activity移动到Pinned Stack上，该窗口就能一直在最上层显示呢？这就是由Z-Order控制的，Z-Order决定了窗口的上下关系。Android N中新增了一个类WindowLayersController来专门负责Z-Order的计算。在计算Z-Order的时候，有几类窗口会进行特殊处理，处于Pinned Stack上的窗口便是其中之一。
+下面这段代码是在统计哪些窗口是需要特殊处理的，这里可以看到，除了Pinned Stack上的窗口，还有分屏模式下的窗口以及输入法窗口都需要特殊处理：
+private void collectSpecialWindows(WindowState w) {
+   if (w.mAttrs.type == TYPE_DOCK_DIVIDER) {
+       mDockDivider = w;
+       return;
+   }
+   if (w.mWillReplaceWindow) {
+       mReplacingWindows.add(w);
+   }
+   if (w.mIsImWindow) {
+       mInputMethodWindows.add(w);
+       return;
+   }
+   final TaskStack stack = w.getStack();
+   if (stack == null) {
+       return;
+   }
+   if (stack.mStackId == PINNED_STACK_ID) {
+       mPinnedWindows.add(w);
+   } else if (stack.mStackId == DOCKED_STACK_ID) {
+       mDockedWindows.add(w);
+   }
+}
+在统计完这些特殊窗口之后，在计算Z-Order时会对它们进行特殊处理：
+private void adjustSpecialWindows() {
+   int layer = mHighestApplicationLayer + WINDOW_LAYER_MULTIPLIER;
+   // For pinned and docked stack window, we want to make them above other windows also when
+   // these windows are animating.
+   while (!mDockedWindows.isEmpty()) {
+       layer = assignAndIncreaseLayerIfNeeded(mDockedWindows.remove(), layer);
+   }
+
+   layer = assignAndIncreaseLayerIfNeeded(mDockDivider, layer);
+
+   if (mDockDivider != null && mDockDivider.isVisibleLw()) {
+       while (!mInputMethodWindows.isEmpty()) {
+           final WindowState w = mInputMethodWindows.remove();
+           // Only ever move IME windows up, else we brake IME for windows above the divider.
+           if (layer > w.mLayer) {
+               layer = assignAndIncreaseLayerIfNeeded(w, layer);
+           }
+       }
+   }
+
+   // We know that we will be animating a relaunching window in the near future, which will
+   // receive a z-order increase. We want the replaced window to immediately receive the same
+   // treatment, e.g. to be above the dock divider.
+   while (!mReplacingWindows.isEmpty()) {
+       layer = assignAndIncreaseLayerIfNeeded(mReplacingWindows.remove(), layer);
+   }
+
+   while (!mPinnedWindows.isEmpty()) {
+       layer = assignAndIncreaseLayerIfNeeded(mPinnedWindows.remove(), layer);
+   }
+}
+这段代码保证了处于Pinned Stack上的窗口（即处于画中画模式的窗口）的会在普通的应用窗口之上。
+Freeform模式
+在Andorid N设备上打开Freeform模式很简单，只需以下两个步骤：
+1. 执行以下命令：adb shell settings put global enable_freeform_support 1
+2. 然后重启手机：adb reboot
+重启之后，在近期任务界面会出现一个按钮，这个按钮可以将窗口切换到Freeform模式，如下图所示：
+
+这个按钮的作用其实就是将当前应用移到Freeform Stack上，相关逻辑在：
+ActivityStackSupervisor中，代码如下：
+void findTaskToMoveToFrontLocked(TaskRecord task, int flags, ActivityOptions options, String reason, boolean forceNonResizeable) {
+   ...
+   if (task.isResizeable() && options != null) {
+       int stackId = options.getLaunchStackId();
+       if (canUseActivityOptionsLaunchBounds(options, stackId)) {
+           final Rect bounds = TaskRecord.validateBounds(options.getLaunchBounds());
+           task.updateOverrideConfiguration(bounds);
+           if (stackId == INVALID_STACK_ID) {
+               stackId = task.getLaunchStackId();
+           }
+           if (stackId != task.stack.mStackId) {
+               final ActivityStack stack = moveTaskToStackUncheckedLocked(
+                       task, stackId, ON_TOP, !FORCE_FOCUS, reason);
+               stackId = stack.mStackId;
+               ...
+}
+这段代码通过查询stackId，然后调用moveTaskToStackUncheckedLocked移动Task。
+而这里通过task.getLaunchStackId()?获取到的stackId，其实就是FREEFORM_WORKSPACE_STACK_ID，相关代码如下：
+TaskRecord#getLaunchStackId代码如下：
+int getLaunchStackId() {
+   if (!isApplicationTask()) {
+       return HOME_STACK_ID;
+   }
+   if (mBounds != null) {
+       return FREEFORM_WORKSPACE_STACK_ID;
+   }
+   return FULLSCREEN_WORKSPACE_STACK_ID;
+}
+即，如果设置了Bound，便表示该Task会在Freeform Stack上启动。
+PS：这里将应用切换到Freeform模式，必须先打开应用，然后在近期任务中切换。
+如果想要打开应用就直接进入Freeform模式，可以看一下这篇文章：
+Taskbar lets you enable Freeform mode on Android Nougat without root or adb
+如果没有Google Play，可以到这里下载上文中提到的Taskbar应用：Taskbar
+有兴趣的读者也可以去GitHub上获取TaskBar的源码：farmerbb/Taskbar
+其实TaskBar的原理就是在启动Activity的时候设置了Activity的Bounds，相关代码如下：
+public static void launchPhoneSize(Context context, Intent intent) {
+   DisplayManager dm = (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
+   Display display = dm.getDisplay(Display.DEFAULT_DISPLAY);
+
+   int width1 = display.getWidth() / 2;
+   int width2 = context.getResources().getDimensionPixelSize(R.dimen.phone_size_width) / 2;
+   int height1 = display.getHeight() / 2;
+   int height2 = context.getResources().getDimensionPixelSize(R.dimen.phone_size_height) / 2;
+
+   try {
+       context.startActivity(intent, ActivityOptions.makeBasic().setLaunchBounds(new Rect(
+               width1 - width2,
+               height1 - height2,
+               width1 + width2,
+               height1 + height2
+       )).toBundle());
+   } catch (ActivityNotFoundException e) { /* Gracefully fail */ }
+}
+而在ActivityStarter#computeStackFocus中会判断如果新启动的Activity设置了Bounds，
+则在FULLSCREEN_WORKSPACE_STACK_ID这个Stack上启动Activity，相关代码如下：
+final int stackId = task != null ? task.getLaunchStackId() :
+      bounds != null ? FREEFORM_WORKSPACE_STACK_ID :
+              FULLSCREEN_WORKSPACE_STACK_ID;
+stack = mSupervisor.getStack(stackId, CREATE_IF_NEEDED, ON_TOP);
+if (DEBUG_FOCUS || DEBUG_STACK) Slog.d(TAG_FOCUS, "computeStackFocus: New stack r="
+      + r + " stackId=" + stack.mStackId);
+return stack;
+下图是启动Activity时创建Stack的调用过程：
+
+当你在全屏应用以及Freeform模式应用来回切换的时候，系统所做的其实就是在FullScreen Stack和Freeform Stack上来回切换而已，这和前面提到的虚拟桌面的几乎是一样的。
+至此，三种多窗口模式就都分析完了，回过头来再看一下，三种多窗口模式的实现其实都是依赖于Stack结构，明白其原理，发现也没有特别神秘的地方。
+--以上--
+参考资料
+https://developer.android.com/guide/topics/ui/multi-window.html
+https://developer.android.com/guide/components/tasks-and-back-stack.html
+http://arstechnica.com/gadgets/2016/03/this-is-android-ns-freeform-window-mode/
+http://www.androidpolice.com/2016/08/27/taskbar-lets-enable-freeform-mode-android-nougat-without-root-adb/
+* 2016年10月23日发布
+?
+* 更多
+
